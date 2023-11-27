@@ -6,8 +6,7 @@ from DASH.CSPR.KSS.env import KSSEnv
 
 
 def main_eval(agent: KSSAgent, env: KSSEnv,
-              max_steps: int = None, max_episode_num: int = None,
-              train=False, values: dict = None):
+              max_steps: int = None, max_episode_num: int = None, values: dict = None):
     """
     the major process is:
         env.step(an action)
@@ -25,7 +24,6 @@ def main_eval(agent: KSSAgent, env: KSSEnv,
             the environment return done=True
         max_episode_num:
             max_episode_num should be set when environment is the type of infinity
-        train
         values
 
     Returns:
@@ -88,6 +86,3 @@ def main_eval(agent: KSSAgent, env: KSSEnv,
         values["Episode"].update("Reward", reward)
 
         env.reset()
-
-        if train is True:
-            agent.tune()

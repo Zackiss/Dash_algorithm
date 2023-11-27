@@ -26,52 +26,25 @@ def compute_accuracy(all_target, all_pred):
     return metrics.accuracy_score(all_target, all_pred)
 
 
-def train_one_epoch(net, optimizer, criterion, batch_size, a_data, e_data, it_data, at_data):
-    """
-
-    Args:
-        net:
-        optimizer:
-        criterion:
-        batch_size:
-        a_data:
-        e_data:
-        it_data: interval time data
-        at_data: answer time data
-
-    Returns:
-
-    """
+def train_one_epoch(net, optimizer, criterion, dataloader):
     net.train()
-    n = int(math.ceil(len(e_data) / batch_size))
-    shuffled_ind = np.arange(e_data.shape[0])
-    np.random.shuffle(shuffled_ind)
-    e_data = e_data[shuffled_ind]
-    at_data = at_data[shuffled_ind]
-    a_data = a_data[shuffled_ind]
-    it_data = it_data[shuffled_ind]
 
     pred_list = []
     target_list = []
 
-    for idx in tqdm.tqdm(range(n), 'Training'):
+    for outcomes, problem_ids, interval_times, time_spent in tqdm.tqdm(dataloader, 'Training'):
         optimizer.zero_grad()
 
-        e_one_seq = e_data[idx * batch_size: (idx + 1) * batch_size, :]
-        at_one_seq = at_data[idx * batch_size: (idx + 1) * batch_size, :]
-        a_one_seq = a_data[idx * batch_size: (idx + 1) * batch_size, :]
-        it_one_seq = it_data[idx * batch_size: (idx + 1) * batch_size, :]
+        outcomes = outcomes.to(device)
+        problem_ids = problem_ids.to(device)
+        interval_times = interval_times.to(device)
+        time_spent = time_spent.to(device)
 
-        input_e = torch.from_numpy(e_one_seq).long().to(device)
-        input_at = torch.from_numpy(at_one_seq).long().to(device)
-        input_it = torch.from_numpy(it_one_seq).long().to(device)
-        target = torch.from_numpy(a_one_seq).float().to(device)
+        pred = net(problem_ids, interval_times, outcomes, time_spent)
 
-        pred = net(input_e, input_at, target, input_it)
-
-        mask = input_e[:, 1:] > 0
+        mask = problem_ids[:, 1:] > 0
         masked_pred = pred[:, 1:][mask]
-        masked_truth = target[:, 1:][mask]
+        masked_truth = outcomes[:, 1:][mask]
 
         loss = criterion(masked_pred, masked_truth).sum()
 
@@ -94,30 +67,24 @@ def train_one_epoch(net, optimizer, criterion, batch_size, a_data, e_data, it_da
     return loss, auc, accuracy
 
 
-def test_one_epoch(net, batch_size, a_data, e_data, it_data, at_data):
+def test_one_epoch(net, dataloader):
     net.eval()
-    n = int(math.ceil(len(e_data) / batch_size))
 
     pred_list = []
     target_list = []
 
-    for idx in tqdm.tqdm(range(n), 'Testing'):
-        e_one_seq = e_data[idx * batch_size: (idx + 1) * batch_size, :]
-        at_one_seq = at_data[idx * batch_size: (idx + 1) * batch_size, :]
-        a_one_seq = a_data[idx * batch_size: (idx + 1) * batch_size, :]
-        it_one_seq = it_data[idx * batch_size: (idx + 1) * batch_size, :]
-
-        input_e = torch.from_numpy(e_one_seq).long().to(device)
-        input_at = torch.from_numpy(at_one_seq).long().to(device)
-        input_it = torch.from_numpy(it_one_seq).long().to(device)
-        target = torch.from_numpy(a_one_seq).float().to(device)
+    for outcomes, problem_ids, interval_times, time_spent in tqdm.tqdm(dataloader, 'Testing'):
+        outcomes = outcomes.to(device)
+        problem_ids = problem_ids.to(device)
+        interval_times = interval_times.to(device)
+        time_spent = time_spent.to(device)
 
         with torch.no_grad():
-            pred = net(input_e, input_at, target, input_it)
+            pred = net(problem_ids, interval_times, outcomes, time_spent)
 
-            mask = input_e[:, 1:] > 0
+            mask = problem_ids[:, 1:] > 0
             masked_pred = pred[:, 1:][mask].detach().cpu().numpy()
-            masked_truth = target[:, 1:][mask].detach().cpu().numpy()
+            masked_truth = outcomes[:, 1:][mask].detach().cpu().numpy()
 
             pred_list.append(masked_pred)
             target_list.append(masked_truth)
@@ -139,7 +106,8 @@ class LPKT:
         self.lpkt_net = LPKTNet(n_at, n_it, n_exercise, n_question, d_a, d_e, d_k, q_matrix, dropout).to(device)
         self.batch_size = batch_size
 
-    def train(self, train_data, test_data=None, *, epoch: int, lr=0.002, lr_decay_step=15, lr_decay_rate=0.5) -> ...:
+    def train(self, train_dataloader, test_dataloader=None, *, epoch: int, lr=0.002, lr_decay_step=15,
+              lr_decay_rate=0.5) -> ...:
         optimizer = torch.optim.Adam(self.lpkt_net.parameters(), lr=lr, eps=1e-8, betas=(0.1, 0.999), weight_decay=1e-6)
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, lr_decay_step, gamma=lr_decay_rate)
         criterion = nn.BCELoss(reduction='none')
@@ -147,24 +115,24 @@ class LPKT:
 
         for idx in range(epoch):
             train_loss, train_auc, train_accuracy = train_one_epoch(self.lpkt_net, optimizer, criterion,
-                                                                    self.batch_size, *train_data)
+                                                                    train_dataloader)
             print("[Epoch %d] LogisticLoss: %.6f" % (idx, train_loss))
             if train_auc > best_train_auc:
                 best_train_auc = train_auc
 
             scheduler.step()
 
-            if test_data is not None:
-                test_loss, test_auc, test_accuracy = self.eval(test_data)
+            if test_dataloader is not None:
+                test_loss, test_auc, test_accuracy = test_one_epoch(self.lpkt_net, test_dataloader)
                 print("[Epoch %d] auc: %.6f, accuracy: %.6f" % (idx, test_auc, test_accuracy))
                 if test_auc > best_test_auc:
                     best_test_auc = test_auc
 
         return best_train_auc, best_test_auc
 
-    def eval(self, test_data) -> ...:
+    def eval(self, test_data_loader) -> ...:
         self.lpkt_net.eval()
-        return test_one_epoch(self.lpkt_net, self.batch_size, *test_data)
+        return test_one_epoch(self.lpkt_net, test_data_loader)
 
     def save(self, filepath) -> ...:
         torch.save(self.lpkt_net.state_dict(), filepath)

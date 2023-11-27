@@ -2,11 +2,9 @@ import torch
 
 
 class KSSAgent(object):
-    def __init__(self, decision_model, start_state, state_mean, state_std, reward_scale=1000.0, target_return=3.6):
+    def __init__(self, decision_model, start_state, reward_scale=1000.0, target_return=3.6):
         self.decision_model = decision_model
         self.reward_scale = reward_scale
-        self.state_mean = state_mean
-        self.state_std = state_std
         self.target_return = torch.tensor(target_return).float().reshape(1, 1)
         self.states = torch.from_numpy(start_state).reshape(1, self.decision_model.config.state_dim).float()
         self.rewards = torch.zeros(0).float()
@@ -42,15 +40,10 @@ class KSSAgent(object):
         self.target_return = torch.cat([self.target_return, pred_return.reshape(1, 1)], dim=1)
         self.time_steps = torch.cat([self.time_steps, torch.ones((1, 1)).long() * (t + 1)], dim=1)
 
-        # TODO In the decision transformer training process, you need to record the necessary rewards and so on
-        #  to build the dataset
-
     def step(self):
         # This implementation does not condition on past rewards
         self.actions = torch.cat([self.actions, torch.zeros((1, self.decision_model.config.act_dim))], dim=0)
         self.rewards = torch.cat([self.rewards, torch.zeros(1)])
-
-        self.states = (self.states - self.state_mean) / self.state_std
 
         states = self.states.reshape(1, -1, self.decision_model.config.state_dim)
         actions = self.actions.reshape(1, -1, self.decision_model.config.act_dim)
@@ -70,17 +63,15 @@ class KSSAgent(object):
         returns_to_go = torch.cat([torch.zeros((1, padding, 1)), returns_to_go], dim=1).float()
         time_steps = torch.cat([torch.zeros((1, padding), dtype=torch.long), time_steps], dim=1)
 
-        # state_preds, action_preds, return_preds = self.decision_model.original_forward(
-        #     states=states,
-        #     actions=actions,
-        #     rewards=self.rewards,
-        #     returns_to_go=returns_to_go,
-        #     timesteps=time_steps,
-        #     attention_mask=attention_mask,
-        #     return_dict=False,
-        # )
-
-        # TODO in the decision model training process, you should recommend the next action directly from the dataset
+        state_preds, action_preds, return_preds = self.decision_model.original_forward(
+            states=states,
+            actions=actions,
+            rewards=self.rewards,
+            returns_to_go=returns_to_go,
+            timesteps=time_steps,
+            attention_mask=attention_mask,
+            return_dict=False,
+        )
 
         self.actions[-1] = action_preds[0, -1]
 

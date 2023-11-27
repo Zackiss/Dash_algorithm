@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 from torch import nn
 
@@ -102,49 +103,75 @@ class LPKTNet(nn.Module):
 
         return pred
 
-    def obtain_h_from_h(self, h_pre, e, at, a, it):
+    def obtain_h_from_h_batch(self, e_batch, at_batch, a_batch, it_batch):
         """
-        Update the hidden state h_pre based on the inputs.
+        Update the hidden states h_pre_batch based on the batch inputs.
 
         Args:
-            h_pre: The previous hidden state.
-            e: The input exercise.
-            at: The answer time.
-            a: The input answer.
-            it: The interval time.
+            e_batch: The batch of input exercises. Size: (batch_size, context_len)
+            at_batch: The batch of answer times. Size: (batch_size, context_len)
+            a_batch: The batch of input answers. Size: (batch_size, context_len, dim_a)
+            it_batch: The batch of interval times. Size: (batch_size, context_len)
 
         Returns:
-            The updated hidden state h.
+            All hidden states h_all. Size: (batch_size, context_len, h_dim)
         """
-        batch_size = e.size(0)
-        q_e = self.q_matrix[e].view(batch_size, 1, -1)
-        it_embed = self.it_embed(it)
+        batch_size, context_len, _ = e_batch.size()
+        reward = None
+        # h_pre_batch: The previous hidden states batch. Size: (batch_size, context_len, h_dim)
+        h_pre_batch = torch.zeros(batch_size, context_len, self.h_dim).to(device)
 
-        all_learning = self.linear_1(
-            torch.cat((
-                self.e_embed(e), self.at_embed(at), a.view(-1, 1).repeat(1, self.d_a).view(batch_size, -1, self.d_a),
-            ),
-                dim=2)
-        )
-        learning_pre = torch.zeros(batch_size, self.d_k).to(device)
+        for i in range(context_len):
+            e = e_batch[:, i]  # Exercise tensor for current time step. Size: (batch_size,)
+            at = at_batch[:, i]  # Answer time tensor for current time step. Size: (batch_size,)
+            a = a_batch[:, i]  # Answer tensor for current time step. Size: (batch_size, dim_a)
+            it = it_batch[:, i]  # Interval time tensor for current time step. Size: (batch_size,)
 
-        learning_gain = self.linear_2(torch.cat((learning_pre, it_embed, all_learning), dim=1))
-        learning_gain = self.tanh(learning_gain)
+            q_e = self.q_matrix[e].unsqueeze(1)  # Exercise embedding tensor. Size: (batch_size, 1, q_dim)
+            it_embed = self.it_embed(it)  # Interval time embedding tensor. Size: (batch_size, it_dim)
 
-        gamma_l = self.linear_3(torch.cat((learning_pre, it_embed, all_learning), dim=1))
-        gamma_l = self.sig(gamma_l)
+            all_learning = self.linear_1(
+                torch.cat((self.e_embed(e), self.at_embed(at), a), dim=2)
+            )  # Concatenated input tensor. Size: (batch_size, 1, all_dim)
 
-        LG = gamma_l * ((learning_gain + 1) / 2)
-        LG_tilde = self.dropout(q_e.transpose(1, 2).bmm(LG.view(batch_size, 1, -1)))
+            learning_pre = torch.zeros(batch_size, self.d_k).to(device)  # Learning pre tensor. Size: (batch_size, d_k)
+            learning_gain = self.linear_2(torch.cat((learning_pre, it_embed, all_learning), dim=1))
+            learning_gain = self.tanh(learning_gain)  # Learning gain tensor. Size: (batch_size, d_k)
+            gamma_l = self.linear_3(torch.cat((learning_pre, it_embed, all_learning), dim=1))
+            gamma_l = self.sig(gamma_l)  # Gamma_l tensor. Size: (batch_size, d_k)
+            LG = gamma_l * ((learning_gain + 1) / 2)  # LG tensor. Size: (batch_size, d_k)
+            LG_tilde = self.dropout(q_e.transpose(1, 2).bmm(LG.unsqueeze(2))).squeeze(2)
+            # LG_tilde tensor. Size: (batch_size, q_dim)
 
-        n_skill = LG_tilde.size(1)
-        gamma_f = self.sig(self.linear_4(
-            torch.cat((
-                h_pre, LG.repeat(1, n_skill).view(batch_size, -1, self.d_k),
-                it_embed.repeat(1, n_skill).view(batch_size, -1, self.d_k)
-            ),
-                dim=2)
-        ))
-        h = LG_tilde + gamma_f * h_pre
+            n_skill = LG_tilde.size(1)
+            gamma_f = self.sig(
+                self.linear_4(
+                    torch.cat((h_pre_batch, LG.repeat(1, n_skill).view(batch_size, -1, self.d_k),
+                               it_embed.repeat(1, n_skill).view(batch_size, -1, self.d_k)), dim=2)
+                )
+            )  # Gamma_f tensor. Size: (batch_size, n_skill, d_k)
+            h = LG_tilde + gamma_f * h_pre_batch[:, i]  # Updated h tensor at current time step
+            h_pre_batch[:, i] = h
 
-        return h
+            last_h = h_pre_batch[:, -1]  # Last h in the batch across time steps
+            next_h = torch.cat((h_pre_batch[:, 1:], torch.zeros(batch_size, 1, self.h_dim).to(device)), dim=1)
+            reward = next_h - last_h.unsqueeze(1)
+            reward[:, -1] = torch.zeros(batch_size, self.h_dim).to(device)
+
+        gamma = 0.9  # Discount factor (you can adjust this value)
+        reward_np = reward.cpu().numpy()  # Convert reward tensor to numpy array
+        return_to_go = np.zeros_like(reward_np)
+
+        for b in range(batch_size):
+            return_to_go[b] = discount_cum_sum(reward_np[b], gamma)
+        return_to_go_tensor = torch.from_numpy(return_to_go).to(device)
+
+        return h_pre_batch, return_to_go_tensor
+
+
+def discount_cum_sum(x, gamma):
+    disc_cum_sum = np.zeros_like(x)
+    disc_cum_sum[-1] = x[-1]
+    for t in reversed(range(x.shape[0] - 1)):
+        disc_cum_sum[t] = x[t] + gamma * disc_cum_sum[t + 1]
+    return disc_cum_sum
